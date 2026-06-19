@@ -43,9 +43,25 @@
 /// @endcond
 
 #include <Adafruit_GFX.h>
+#include <Wire.h>
 
 #ifndef _ADAFRUIT_RA8875_H
 #define _ADAFRUIT_RA8875_H ///< File has been included
+
+/**************************************************************************/
+/*!
+ @enum RA8875interface The host interface used to talk to the RA8875
+ */
+/**************************************************************************/
+enum RA8875interface {
+  RA8875_INTERFACE_SPI, /*!< 4-wire SPI (default) */
+  RA8875_INTERFACE_I2C  /*!< I2C */
+};
+
+/// Default 7-bit I2C slave address. PLACEHOLDER: the real address is set by the
+/// module's hardwired IICA strap pins - confirm it with an I2C scanner sketch
+/// (or override it via the constructor) before relying on this value.
+#define RA8875_DEFAULT_I2CADDR 0x27
 
 // Touchscreen Calibration and EEPROM Storage Defines
 #define CFG_EEPROM_TOUCHSCREEN_CAL_AN 0       ///< EEPROM Storage Location
@@ -139,6 +155,8 @@ typedef struct // Matrix
 class Adafruit_RA8875 : public Adafruit_GFX {
  public:
   Adafruit_RA8875(uint8_t cs, uint8_t rst);
+  Adafruit_RA8875(uint8_t rst, TwoWire* theWire,
+                  uint8_t i2caddr = RA8875_DEFAULT_I2CADDR);
 
   boolean begin(enum RA8875sizes s);
   void softReset(void);
@@ -293,6 +311,13 @@ class Adafruit_RA8875 : public Adafruit_GFX {
     y = temp;
   }
 
+  /* I2C bulk pixel writer (chunked to the Wire TX buffer) */
+  void i2cWritePixels(const uint16_t* p, uint32_t num, uint16_t repeatColor,
+                      bool useArray);
+
+  enum RA8875interface _interface; ///< SPI or I2C transport
+  TwoWire* _wire;                  ///< I2C bus (valid only in I2C mode)
+  uint8_t _i2caddr;                ///< 7-bit I2C slave address
   uint8_t _cs, _rst;
   uint16_t _width, _height;
   uint8_t _textScale;

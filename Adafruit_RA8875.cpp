@@ -76,7 +76,7 @@ static inline void spi_end(void) {
 
 /**************************************************************************/
 /*!
-      Constructor for a new RA8875 instance
+      Constructor for a new RA8875 instance using the SPI interface
 
       @param CS  Location of the SPI chip select pin
       @param RST Location of the reset pin
@@ -84,8 +84,29 @@ static inline void spi_end(void) {
 /**************************************************************************/
 Adafruit_RA8875::Adafruit_RA8875(uint8_t CS, uint8_t RST)
     : Adafruit_GFX(800, 480) {
+  _interface = RA8875_INTERFACE_SPI;
   _cs = CS;
   _rst = RST;
+  _wire = NULL;
+  _i2caddr = 0;
+}
+
+/**************************************************************************/
+/*!
+      Constructor for a new RA8875 instance using the I2C interface
+
+      @param RST     Location of the reset pin
+      @param theWire The I2C bus to use (e.g. &Wire)
+      @param i2caddr The 7-bit I2C slave address of the RA8875
+*/
+/**************************************************************************/
+Adafruit_RA8875::Adafruit_RA8875(uint8_t RST, TwoWire* theWire, uint8_t i2caddr)
+    : Adafruit_GFX(800, 480) {
+  _interface = RA8875_INTERFACE_I2C;
+  _cs = 255; // unused in I2C mode
+  _rst = RST;
+  _wire = theWire;
+  _i2caddr = i2caddr;
 }
 
 /**************************************************************************/
@@ -120,8 +141,10 @@ boolean Adafruit_RA8875::begin(enum RA8875sizes s) {
     return false;
   }
   _rotation = 0;
-  pinMode(_cs, OUTPUT);
-  digitalWrite(_cs, HIGH);
+  if (_interface == RA8875_INTERFACE_SPI) {
+    pinMode(_cs, OUTPUT);
+    digitalWrite(_cs, HIGH);
+  }
   pinMode(_rst, OUTPUT);
 
   digitalWrite(_rst, LOW);
@@ -129,26 +152,31 @@ boolean Adafruit_RA8875::begin(enum RA8875sizes s) {
   digitalWrite(_rst, HIGH);
   delay(100);
 
-  SPI.begin();
+  if (_interface == RA8875_INTERFACE_I2C) {
+    _wire->begin();
+    _wire->setClock(400000); // RA8875 I2C Fast-mode max
+  } else {
+    SPI.begin();
 
 #ifdef SPI_HAS_TRANSACTION
 /// @cond DISABLE
 #if defined(ARDUINO_ARCH_ARC32)
-  /// @endcond
-  spi_speed = 2000000;
+    /// @endcond
+    spi_speed = 2000000;
 /// @cond DISABLE
 #else
-  /// @endcond
-  spi_speed = 125000;
+    /// @endcond
+    spi_speed = 125000;
 /// @cond DISABLE
 #endif
 /// @endcond
 #else
 #ifdef __AVR__
-  SPI.setClockDivider(SPI_CLOCK_DIV128);
-  SPI.setDataMode(SPI_MODE0);
+    SPI.setClockDivider(SPI_CLOCK_DIV128);
+    SPI.setDataMode(SPI_MODE0);
 #endif
 #endif
+  }
 
   uint8_t x = readReg(0);
   //    Serial.print("x = 0x"); Serial.println(x,HEX);
@@ -159,19 +187,21 @@ boolean Adafruit_RA8875::begin(enum RA8875sizes s) {
 
   initialize();
 
+  if (_interface == RA8875_INTERFACE_SPI) {
 #ifdef SPI_HAS_TRANSACTION
 /// @cond DISABLE
 #if defined(ARDUINO_ARCH_ARC32)
-  /// @endcond
-  spi_speed = 12000000L;
+    /// @endcond
+    spi_speed = 12000000L;
 #else
-  spi_speed = 4000000L;
+    spi_speed = 4000000L;
 #endif
 #else
 #ifdef __AVR__
-  SPI.setClockDivider(SPI_CLOCK_DIV4);
+    SPI.setClockDivider(SPI_CLOCK_DIV4);
 #endif
 #endif
+  }
 
   return true;
 }
@@ -606,6 +636,10 @@ void Adafruit_RA8875::setXY(uint16_t x, uint16_t y) {
 */
 /**************************************************************************/
 void Adafruit_RA8875::pushPixels(uint32_t num, uint16_t p) {
+  if (_interface == RA8875_INTERFACE_I2C) {
+    i2cWritePixels(NULL, num, p, false);
+    return;
+  }
   digitalWrite(_cs, LOW);
   SPI.transfer(RA8875_DATAWRITE);
   while (num--) {
@@ -613,6 +647,46 @@ void Adafruit_RA8875::pushPixels(uint32_t num, uint16_t p) {
     SPI.transfer(p);
   }
   digitalWrite(_cs, HIGH);
+}
+
+/**************************************************************************/
+/*!
+      Stream a run of RGB565 pixels to display RAM over I2C, chunked to the
+      Wire library's TX buffer. The RA8875 memory-write control byte is
+      re-emitted at the start of each chunk; the RAM pointer auto-increments
+      and persists across transactions, so the run continues seamlessly.
+
+      @param p           Array of RGB565 pixels (used when useArray is true)
+      @param num         Number of pixels to write
+      @param repeatColor Single color used when useArray is false
+      @param useArray    True to read from p[], false to repeat repeatColor
+*/
+/**************************************************************************/
+void Adafruit_RA8875::i2cWritePixels(const uint16_t* p, uint32_t num,
+                                     uint16_t repeatColor, bool useArray) {
+#if defined(BUFFER_LENGTH)
+  const uint16_t maxPayload = BUFFER_LENGTH - 1;
+#elif defined(WIRE_BUFFER_LENGTH)
+  const uint16_t maxPayload = WIRE_BUFFER_LENGTH - 1;
+#elif defined(I2C_BUFFER_LENGTH)
+  const uint16_t maxPayload = I2C_BUFFER_LENGTH - 1;
+#else
+  const uint16_t maxPayload = 31; // safe AVR floor
+#endif
+  const uint16_t maxPixels = maxPayload / 2; // 2 bytes per pixel, never split
+
+  while (num) {
+    uint16_t n = (num < maxPixels) ? (uint16_t)num : maxPixels;
+    _wire->beginTransmission(_i2caddr);
+    _wire->write(RA8875_DATAWRITE);
+    for (uint16_t i = 0; i < n; i++) {
+      uint16_t c = useArray ? *p++ : repeatColor;
+      _wire->write(c >> 8);
+      _wire->write(c & 0xFF);
+    }
+    _wire->endTransmission();
+    num -= n;
+  }
 }
 
 /**************************************************************************/
@@ -679,6 +753,10 @@ void Adafruit_RA8875::drawPixel(int16_t x, int16_t y, uint16_t color) {
   writeReg(RA8875_CURV0, y);
   writeReg(RA8875_CURV1, y >> 8);
   writeCommand(RA8875_MRWC);
+  if (_interface == RA8875_INTERFACE_I2C) {
+    i2cWritePixels(&color, 1, 0, true);
+    return;
+  }
   digitalWrite(_cs, LOW);
   SPI.transfer(RA8875_DATAWRITE);
   SPI.transfer(color >> 8);
@@ -713,6 +791,10 @@ void Adafruit_RA8875::drawPixels(uint16_t* p, uint32_t num, int16_t x,
   writeReg(RA8875_MWCR0, (readReg(RA8875_MWCR0) & ~RA8875_MWCR0_DIRMASK) | dir);
 
   writeCommand(RA8875_MRWC);
+  if (_interface == RA8875_INTERFACE_I2C) {
+    i2cWritePixels(p, num, 0, true);
+    return;
+  }
   digitalWrite(_cs, LOW);
   SPI.transfer(RA8875_DATAWRITE);
   while (num--) {
@@ -1661,6 +1743,13 @@ uint8_t Adafruit_RA8875::readReg(uint8_t reg) {
 */
 /**************************************************************************/
 void Adafruit_RA8875::writeData(uint8_t d) {
+  if (_interface == RA8875_INTERFACE_I2C) {
+    _wire->beginTransmission(_i2caddr);
+    _wire->write(RA8875_DATAWRITE);
+    _wire->write(d);
+    _wire->endTransmission();
+    return;
+  }
   digitalWrite(_cs, LOW);
   spi_begin();
   SPI.transfer(RA8875_DATAWRITE);
@@ -1677,6 +1766,13 @@ void Adafruit_RA8875::writeData(uint8_t d) {
 */
 /**************************************************************************/
 uint8_t Adafruit_RA8875::readData(void) {
+  if (_interface == RA8875_INTERFACE_I2C) {
+    _wire->beginTransmission(_i2caddr);
+    _wire->write(RA8875_DATAREAD);
+    _wire->endTransmission(false); // repeated START
+    _wire->requestFrom(_i2caddr, (uint8_t)1);
+    return _wire->read();
+  }
   digitalWrite(_cs, LOW);
   spi_begin();
 
@@ -1696,6 +1792,13 @@ uint8_t Adafruit_RA8875::readData(void) {
  */
 /**************************************************************************/
 void Adafruit_RA8875::writeCommand(uint8_t d) {
+  if (_interface == RA8875_INTERFACE_I2C) {
+    _wire->beginTransmission(_i2caddr);
+    _wire->write(RA8875_CMDWRITE);
+    _wire->write(d);
+    _wire->endTransmission();
+    return;
+  }
   digitalWrite(_cs, LOW);
   spi_begin();
 
@@ -1714,6 +1817,13 @@ void Adafruit_RA8875::writeCommand(uint8_t d) {
  */
 /**************************************************************************/
 uint8_t Adafruit_RA8875::readStatus(void) {
+  if (_interface == RA8875_INTERFACE_I2C) {
+    _wire->beginTransmission(_i2caddr);
+    _wire->write(RA8875_CMDREAD);
+    _wire->endTransmission(false); // repeated START
+    _wire->requestFrom(_i2caddr, (uint8_t)1);
+    return _wire->read();
+  }
   digitalWrite(_cs, LOW);
   spi_begin();
   SPI.transfer(RA8875_CMDREAD);
